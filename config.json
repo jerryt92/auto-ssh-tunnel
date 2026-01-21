@@ -1,0 +1,10 @@
+{
+    "taskName": "AutoSSHTunnel",
+    "sshTunnel": [
+        {
+            "SshTarget": "root@server",
+            "ForwardRules": "-R 0.0.0.0:3389:127.0.0.1:3389",
+            "ReconnectInterval": 30
+        }
+    ]
+}
