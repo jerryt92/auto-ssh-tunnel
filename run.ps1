@@ -110,6 +110,7 @@ function Start-TunnelLoop {
     param(
         [Parameter(Mandatory=$true)][object]$Config,
         [Parameter(Mandatory=$true)][string]$BaseDir,
+        [Parameter(Mandatory=$true)][string]$LogDir,
         [Parameter(Mandatory=$true)][string]$LogFile
     )
 
@@ -189,7 +190,20 @@ function Start-TunnelLoop {
 
         Write-Host "Starting Tunnel '$($Config.ServiceName)' -> $($Config.SshTarget)..."
 
+        # 计划任务/无交互环境下，有时会出现 PipelineStoppedException（"The pipeline has been stopped."）
+        # 为了保证按 ReconnectInterval 重试，这里显式捕获并继续循环。
+        trap [System.Management.Automation.PipelineStoppedException] {
+            Write-Host "Native command/pipeline was stopped: $($_.Exception.Message)"
+            if ([int]$Config.ReconnectInterval -gt 0) {
+                Write-Host "Waiting $($Config.ReconnectInterval) seconds..."
+                Start-Sleep -Seconds ([int]$Config.ReconnectInterval)
+                continue
+            }
+            break
+        }
+
         while ($true) {
+            $shouldContinue = $true
             try {
                 $SshArgs = @()
                 $SshArgs += "-i"; $SshArgs += $KeyPath
@@ -208,16 +222,60 @@ function Start-TunnelLoop {
                 $SshArgs += $Config.SshTarget
 
                 Write-Host "Executing: ssh $($SshArgs -join ' ')"
-                $Process = Start-Process -FilePath "ssh.exe" -ArgumentList $SshArgs -NoNewWindow -PassThru -Wait
+
+                # 在计划任务/无交互会话里，-NoNewWindow 可能导致宿主直接中断。
+                # 这里改为重定向 stdout/stderr 到文件，既能无人值守，也能保留 ssh 的真实报错。
+                $safeName = ($Config.ServiceName -replace '[\\/:*?"<>| ]', '_')
+
+                # 你希望“文件名不带日期”，但仍要避免每次启动覆盖掉历史输出：
+                # - Start-Process 的 Redirect 会覆盖文件，因此用临时文件接收，再追加到固定文件名。
+                $SshOut = Join-Path $LogDir ("ssh_{0}.out.log" -f $safeName)
+                $SshErr = Join-Path $LogDir ("ssh_{0}.err.log" -f $safeName)
+                $tmpId = "{0}_{1}" -f $PID, ([Guid]::NewGuid().ToString("N").Substring(0,8))
+                $TmpOut = Join-Path $LogDir ("ssh_{0}.out.tmp.{1}.log" -f $safeName, $tmpId)
+                $TmpErr = Join-Path $LogDir ("ssh_{0}.err.tmp.{1}.log" -f $safeName, $tmpId)
+
+                $Process = Start-Process -FilePath "ssh.exe" -ArgumentList $SshArgs -PassThru -Wait -RedirectStandardOutput $TmpOut -RedirectStandardError $TmpErr
                 Write-Host "SSH process exited with code: $($Process.ExitCode)"
+
+                # 把 ssh 输出也写进 transcript（只打印尾部，避免爆日志）
+                if (Test-Path $TmpErr) {
+                    Add-Content -Path $SshErr -Value (Get-Content -Path $TmpErr -ErrorAction SilentlyContinue) -ErrorAction SilentlyContinue
+                    Remove-Item -Path $TmpErr -Force -ErrorAction SilentlyContinue
+                }
+                if (Test-Path $TmpOut) {
+                    Add-Content -Path $SshOut -Value (Get-Content -Path $TmpOut -ErrorAction SilentlyContinue) -ErrorAction SilentlyContinue
+                    Remove-Item -Path $TmpOut -Force -ErrorAction SilentlyContinue
+                }
+
+                if (Test-Path $SshErr) {
+                    $errTail = @(Get-Content -Path $SshErr -ErrorAction SilentlyContinue -Tail 200)
+                    if ($errTail.Count -gt 0) {
+                        Write-Host "--- ssh stderr (tail) ---"
+                        $errTail | ForEach-Object { Write-Host $_ }
+                    }
+                }
+                if (Test-Path $SshOut) {
+                    $outTail = @(Get-Content -Path $SshOut -ErrorAction SilentlyContinue -Tail 200)
+                    if ($outTail.Count -gt 0) {
+                        Write-Host "--- ssh stdout (tail) ---"
+                        $outTail | ForEach-Object { Write-Host $_ }
+                    }
+                }
             } catch {
                 Write-Host "Loop Error: $_"
+            } finally {
+                # 无论 ssh 是正常退出、失败退出、还是抛异常，都按 ReconnectInterval 做重试等待
+                if ([int]$Config.ReconnectInterval -gt 0) {
+                    Write-Host "Waiting $($Config.ReconnectInterval) seconds..."
+                    Start-Sleep -Seconds ([int]$Config.ReconnectInterval)
+                    $shouldContinue = $true
+                } else {
+                    $shouldContinue = $false
+                }
             }
 
-            if ([int]$Config.ReconnectInterval -gt 0) {
-                Write-Host "Waiting $($Config.ReconnectInterval) seconds..."
-                Start-Sleep -Seconds ([int]$Config.ReconnectInterval)
-            } else {
+            if (-not $shouldContinue) {
                 break
             }
         }
@@ -244,10 +302,15 @@ try {
     $AllConfigs = Normalize-Entries -Entries $AllConfigs -TaskName $taskName
     $Selected = Select-Configs -AllConfigs $AllConfigs -Index $ConfigIndex -Name $ServiceName
 
+    # 日志目录：logs/{yyyy-MM-dd}/
+    $dateDir = Get-Date -Format "yyyy-MM-dd"
+    $LogDir = Join-Path $ScriptPath (Join-Path "logs" $dateDir)
+    New-Item -ItemType Directory -Path $LogDir -Force | Out-Null
+
     # 单条配置：保持旧行为（debug_log.txt）
     if ($Selected.Count -eq 1) {
-        $LogFile = Join-Path $ScriptPath "debug_log.txt"
-        Start-TunnelLoop -Config $Selected[0] -BaseDir $ScriptPath -LogFile $LogFile
+        $LogFile = Join-Path $LogDir "debug_log.txt"
+        Start-TunnelLoop -Config $Selected[0] -BaseDir $ScriptPath -LogDir $LogDir -LogFile $LogFile
         exit
     }
 
@@ -256,8 +319,8 @@ try {
     $Jobs = @()
     foreach ($cfg in $Selected) {
         $safeName = ($cfg.ServiceName -replace '[\\/:*?"<>| ]', '_')
-        $log = Join-Path $ScriptPath ("debug_log_{0}.txt" -f $safeName)
-        $Jobs += Start-Job -ScriptBlock ${function:Start-TunnelLoop} -ArgumentList @($cfg, $ScriptPath, $log)
+        $log = Join-Path $LogDir ("debug_log_{0}.txt" -f $safeName)
+        $Jobs += Start-Job -ScriptBlock ${function:Start-TunnelLoop} -ArgumentList @($cfg, $ScriptPath, $LogDir, $log)
     }
 
     Write-Host "Started $($Jobs.Count) job(s). Use stop.ps1 to stop them."

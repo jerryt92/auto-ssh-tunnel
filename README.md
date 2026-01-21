@@ -8,7 +8,7 @@
 
 - `run.ps1`：启动并保持 SSH 隧道（断线自动重连），写入 `debug_log*.txt` 便于排查
 - `stop.ps1`：停止正在运行的实例
-- `register_as_task.ps1`：注册“用户登录时自动启动”的计划任务（需要管理员权限）
+- `register_as_task.ps1`：注册“开机自动启动（AtStartup）”的计划任务（需要管理员权限）
 - `unregister_task.ps1`：注销计划任务（需要管理员权限）
 - `config.json`：配置 SSH 目标与端口转发规则
 
@@ -109,12 +109,18 @@ Get-NetTCPConnection -LocalPort 3389 -State Listen
 
 ### 日志与多隧道行为
 
-- **只有 1 条隧道**：日志写到 `debug_log.txt`
-- **有多条隧道**：`run.ps1` 会并行启动，并分别写到 `debug_log_<名字>.txt`
+- 日志都会写到：`logs/YYYY-MM-DD/` 目录下（按日期分目录）
+- **只有 1 条隧道**：`logs/YYYY-MM-DD/debug_log.txt`
+- **有多条隧道**：`run.ps1` 会并行启动，并分别写到 `logs/YYYY-MM-DD/debug_log_<名字>.txt`
   - `<名字>` 会自动生成：
     - 第一条：`<taskName>_0`
     - 第二条：`<taskName>_1`
     - 以此类推
+
+同时会生成 ssh 原始输出（便于排查真实报错）：
+
+- `logs/YYYY-MM-DD/ssh_<名字>.out.log`
+- `logs/YYYY-MM-DD/ssh_<名字>.err.log`
 
 ---
 

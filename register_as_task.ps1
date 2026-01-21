@@ -159,7 +159,27 @@ try {
     
     Write-Host "正在尝试启动任务..."
     Start-ScheduledTask -TaskName $TaskName
-    Write-Host "任务已启动。请查看 debug_log.txt 确认连接状态。" -ForegroundColor Cyan
+
+    # 给任务一点启动时间，然后读取任务状态/上次结果，避免“看起来启动了但其实秒退”
+    Start-Sleep -Seconds 1
+    try {
+        $t = Get-ScheduledTask -TaskName $TaskName -ErrorAction Stop
+        $i = Get-ScheduledTaskInfo -TaskName $TaskName -ErrorAction Stop
+
+        Write-Host "任务当前状态: $($t.State)" -ForegroundColor Cyan
+        Write-Host "上次运行时间: $($i.LastRunTime)" -ForegroundColor Cyan
+        Write-Host ("上次运行结果(LastTaskResult): 0x{0:X8}" -f ([int]$i.LastTaskResult)) -ForegroundColor Cyan
+
+        if ($t.State -ne 'Running') {
+            Write-Host "提示：任务当前不是“正在运行”。这通常表示 run.ps1 启动后立刻退出（例如：找不到 SSH key/ssh.exe、BatchMode 无法免交互登录、端口转发失败、或检测到重复运行 Mutex）。" -ForegroundColor Yellow
+            Write-Host "      请优先查看同目录下的 debug_log*.txt，以及“任务计划程序 -> 任务 -> 历史记录/上次运行结果”。" -ForegroundColor Yellow
+        } else {
+            Write-Host "任务已处于 Running。请查看 debug_log*.txt 确认连接状态。" -ForegroundColor Green
+        }
+    } catch {
+        Write-Host "任务已启动（未能读取任务状态详情）：$($_.Exception.Message)" -ForegroundColor Yellow
+        Write-Host "请查看 debug_log*.txt 与任务计划的“上次运行结果/历史记录”。" -ForegroundColor Yellow
+    }
 }
 catch {
     Write-Error "注册失败: $($_.Exception.Message)"
