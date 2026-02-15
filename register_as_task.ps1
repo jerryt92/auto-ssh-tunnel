@@ -1,6 +1,6 @@
 # register_as_task.ps1
 # 功能：以管理员身份注册一个“开机即跑”的计划任务
-# 默认：使用当前控制台登录用户（需要保存该用户的凭据，才能在未登录时启动）
+# 默认：交互输入要运行任务的用户（回车可使用建议默认值；需要保存该用户的凭据，才能在未登录时启动）
 # 可选：-RunAsSystem 使用 SYSTEM 运行（不需要用户密码，但访问用户目录/网络资源可能受限）
 # 必须以管理员身份运行此脚本！
 
@@ -95,14 +95,31 @@ if ($RawConfig -and ($RawConfig.PSObject.Properties.Name -contains 'sshTunnel'))
 }
 
 # 2) 确定要运行的用户
-# - RunAsUser 未指定时，优先取当前控制台用户（通常是 COMPUTER\user 或 DOMAIN\user）
+# - RunAsUser 未指定时：改为交互输入（回车可使用默认建议值）
 $TargetUser = $null
-if (-not [string]::IsNullOrWhiteSpace($RunAsUser)) {
-    $TargetUser = $RunAsUser
-} else {
-    try { $TargetUser = (Get-CimInstance Win32_ComputerSystem).UserName } catch { $TargetUser = $null }
-    if ([string]::IsNullOrWhiteSpace($TargetUser)) {
-        $TargetUser = "$env:USERDOMAIN\$env:USERNAME"
+
+# 作为“建议默认值”去探测当前登录用户（不再静默直接使用）
+$DefaultTargetUser = $null
+try { $DefaultTargetUser = (Get-CimInstance Win32_ComputerSystem).UserName } catch { $DefaultTargetUser = $null }
+if ([string]::IsNullOrWhiteSpace($DefaultTargetUser)) {
+    $DefaultTargetUser = "$env:USERDOMAIN\$env:USERNAME"
+}
+
+if (-not $RunAsSystem) {
+    if (-not [string]::IsNullOrWhiteSpace($RunAsUser)) {
+        $TargetUser = $RunAsUser.Trim()
+    } else {
+        $inputUser = Read-Host "请输入要运行任务的用户名（例如 DOMAIN\user 或 COMPUTER\user）。直接回车使用默认: $DefaultTargetUser"
+        if ([string]::IsNullOrWhiteSpace($inputUser)) {
+            $TargetUser = $DefaultTargetUser
+        } else {
+            $TargetUser = $inputUser.Trim()
+        }
+    }
+
+    # 支持 .\user 形式，转换为 COMPUTER\user
+    if ($TargetUser -like ".\*") {
+        $TargetUser = "$env:COMPUTERNAME\" + $TargetUser.Substring(2)
     }
 }
 
